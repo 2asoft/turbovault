@@ -362,9 +362,12 @@ struct BlockParserState {
     /// indents under its parent's marker instead of a fixed two spaces.
     quoted_item_indents: Vec<String>,
     table_headers: Vec<String>,
+    table_header_inline: Vec<Vec<InlineElement>>,
     table_alignments: Vec<TableAlignment>,
     table_rows: Vec<Vec<String>>,
+    table_row_inline: Vec<Vec<Vec<InlineElement>>>,
     current_row: Vec<String>,
+    current_row_inline: Vec<Vec<InlineElement>>,
     heading_level: Option<usize>,
     heading_buffer: String,
     heading_inline: Vec<InlineElement>,
@@ -409,9 +412,12 @@ impl BlockParserState {
             quoted_list_overflow: 0,
             quoted_item_indents: Vec::new(),
             table_headers: Vec::new(),
+            table_header_inline: Vec::new(),
             table_alignments: Vec::new(),
             table_rows: Vec::new(),
+            table_row_inline: Vec::new(),
             current_row: Vec::new(),
+            current_row_inline: Vec::new(),
             heading_level: None,
             heading_buffer: String::new(),
             heading_inline: Vec::new(),
@@ -670,6 +676,14 @@ impl BlockParserState {
         }
     }
 
+    fn write_quoted_table_delimiter(&mut self, delimiter: &str) {
+        // A quoted table is parsed again from its cell strings, so formatting
+        // delimiters must survive that intermediate representation.
+        if self.in_table && self.in_blockquote {
+            self.paragraph_buffer.push_str(delimiter);
+        }
+    }
+
     /// Writes a table inside a blockquote back into the quote buffer as
     /// markdown, for the quote's re-parse to rebuild in place, the way fenced
     /// blocks and lists inside a quote are.
@@ -709,9 +723,12 @@ impl BlockParserState {
             self.blockquote_buffer.push_str(&table);
         }
         self.table_headers.clear();
+        self.table_header_inline.clear();
         self.table_alignments.clear();
         self.table_rows.clear();
+        self.table_row_inline.clear();
         self.current_row.clear();
+        self.current_row_inline.clear();
         self.paragraph_buffer.clear();
         self.inline_buffer.clear();
         self.in_table = false;
@@ -721,13 +738,18 @@ impl BlockParserState {
         if self.in_table && !self.table_headers.is_empty() {
             blocks.push(ContentBlock::Table {
                 headers: self.table_headers.clone(),
+                header_inline: self.table_header_inline.clone(),
                 alignments: self.table_alignments.clone(),
                 rows: self.table_rows.clone(),
+                row_inline: self.table_row_inline.clone(),
             });
             self.table_headers.clear();
+            self.table_header_inline.clear();
             self.table_alignments.clear();
             self.table_rows.clear();
+            self.table_row_inline.clear();
             self.current_row.clear();
+            self.current_row_inline.clear();
             self.paragraph_buffer.clear();
             self.inline_buffer.clear();
             self.in_table = false;
@@ -1096,12 +1118,18 @@ fn process_event(event: Event, state: &mut BlockParserState, blocks: &mut Vec<Co
         Event::Start(Tag::TableHead) => {}
         Event::End(TagEnd::TableHead) => {
             state.table_headers = state.current_row.clone();
+            state.table_header_inline = state.current_row_inline.clone();
             state.current_row.clear();
+            state.current_row_inline.clear();
         }
         Event::Start(Tag::TableRow) => {}
         Event::End(TagEnd::TableRow) => {
             state.table_rows.push(state.current_row.clone());
+            state
+                .table_row_inline
+                .push(state.current_row_inline.clone());
             state.current_row.clear();
+            state.current_row_inline.clear();
         }
         Event::Start(Tag::TableCell) => {
             state.paragraph_buffer.clear();
@@ -1109,25 +1137,32 @@ fn process_event(event: Event, state: &mut BlockParserState, blocks: &mut Vec<Co
         }
         Event::End(TagEnd::TableCell) => {
             state.current_row.push(state.paragraph_buffer.clone());
+            state.current_row_inline.push(state.inline_buffer.clone());
             state.paragraph_buffer.clear();
             state.inline_buffer.clear();
         }
         Event::Start(Tag::Strong) => {
+            state.write_quoted_table_delimiter("**");
             state.in_strong = true;
         }
         Event::End(TagEnd::Strong) => {
+            state.write_quoted_table_delimiter("**");
             state.in_strong = false;
         }
         Event::Start(Tag::Emphasis) => {
+            state.write_quoted_table_delimiter("*");
             state.in_emphasis = true;
         }
         Event::End(TagEnd::Emphasis) => {
+            state.write_quoted_table_delimiter("*");
             state.in_emphasis = false;
         }
         Event::Start(Tag::Strikethrough) => {
+            state.write_quoted_table_delimiter("~~");
             state.in_strikethrough = true;
         }
         Event::End(TagEnd::Strikethrough) => {
+            state.write_quoted_table_delimiter("~~");
             state.in_strikethrough = false;
         }
         Event::Code(text) => {
@@ -1142,10 +1177,17 @@ fn process_event(event: Event, state: &mut BlockParserState, blocks: &mut Vec<Co
                 state.blockquote_buffer.push_str(&text);
                 state.blockquote_buffer.push('`');
             } else if state.in_table {
-                // Re-emit with delimiters so table cell strings carry inline code markers
+                // Keep Markdown for source consumers and semantic content for renderers.
                 state.paragraph_buffer.push('`');
                 state.paragraph_buffer.push_str(&text);
                 state.paragraph_buffer.push('`');
+                if state.in_link {
+                    state.link_text.push_str(&text);
+                } else {
+                    state.inline_buffer.push(InlineElement::Code {
+                        value: text.to_string(),
+                    });
+                }
             } else {
                 state.in_code_inline = true;
                 state.add_inline_text(&text);
@@ -1153,6 +1195,9 @@ fn process_event(event: Event, state: &mut BlockParserState, blocks: &mut Vec<Co
             }
         }
         Event::Start(Tag::Link { dest_url, .. }) => {
+            if state.in_table {
+                state.paragraph_buffer.push('[');
+            }
             state.in_link = true;
             state.link_url = dest_url.to_string();
             state.link_text.clear();
@@ -1202,7 +1247,11 @@ fn process_event(event: Event, state: &mut BlockParserState, blocks: &mut Vec<Co
                 title: None,
                 line_offset,
             };
-            let source = format!("[{}]({})", state.link_text, url);
+            let source = if state.in_table {
+                format!("]({url})")
+            } else {
+                format!("[{}]({})", state.link_text, url)
+            };
             // A link renders as its label, except when its label is an image,
             // which renders as nothing.
             let rendered = if state.image_in_link {
@@ -1347,6 +1396,9 @@ fn process_event(event: Event, state: &mut BlockParserState, blocks: &mut Vec<Co
                 state.heading_inline.push(element);
             } else if state.in_link || state.in_image {
                 state.link_text.push_str(&text);
+                if state.in_table && state.in_link && !state.in_image {
+                    state.paragraph_buffer.push_str(&text);
+                }
             } else {
                 state.add_inline_text(&text);
             }
@@ -2523,6 +2575,106 @@ See [[WikiNote]] for more info."#;
         }
     }
 
+    #[test]
+    fn table_code_link_keeps_its_label_in_the_cell_source() {
+        // Arrange
+        let markdown = "| Tool |\n|---|\n| [`less`](https://example.com/less) |";
+
+        // Act
+        let blocks = parse_blocks(markdown);
+
+        // Assert
+        let ContentBlock::Table {
+            rows, row_inline, ..
+        } = &blocks[0]
+        else {
+            panic!("expected a table, got {blocks:?}");
+        };
+        assert_eq!(rows[0][0], "[`less`](https://example.com/less)");
+        assert!(matches!(
+            &row_inline[0][0][0],
+            InlineElement::Link { text, url, .. }
+                if text == "less" && url == "https://example.com/less"
+        ));
+    }
+
+    #[test]
+    fn table_cells_expose_semantic_inline_content() {
+        // Arrange
+        let markdown = "| **Name** | Value |\n|---|---|\n| `tool` | *fast* |";
+
+        // Act
+        let blocks = parse_blocks(markdown);
+
+        // Assert
+        let ContentBlock::Table {
+            header_inline,
+            row_inline,
+            ..
+        } = &blocks[0]
+        else {
+            panic!("expected a table, got {blocks:?}");
+        };
+        assert_eq!(
+            header_inline[0],
+            vec![InlineElement::Strong {
+                value: "Name".into()
+            }]
+        );
+        assert_eq!(
+            row_inline[0][0],
+            vec![InlineElement::Code {
+                value: "tool".into()
+            }]
+        );
+        assert_eq!(
+            row_inline[0][1],
+            vec![InlineElement::Emphasis {
+                value: "fast".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn quoted_table_cells_keep_their_inline_styles() {
+        // Arrange
+        let markdown = "> | **Name** | Value |\n> |---|---|\n> | ~~slow~~ | *fast* |";
+
+        // Act
+        let blocks = parse_blocks(markdown);
+
+        // Assert
+        let ContentBlock::Blockquote { blocks: inner, .. } = &blocks[0] else {
+            panic!("expected a quote, got {blocks:?}");
+        };
+        let ContentBlock::Table {
+            header_inline,
+            row_inline,
+            ..
+        } = &inner[0]
+        else {
+            panic!("expected a table, got {inner:?}");
+        };
+        assert_eq!(
+            header_inline[0],
+            vec![InlineElement::Strong {
+                value: "Name".into()
+            }]
+        );
+        assert_eq!(
+            row_inline[0][0],
+            vec![InlineElement::Strikethrough {
+                value: "slow".into()
+            }]
+        );
+        assert_eq!(
+            row_inline[0][1],
+            vec![InlineElement::Emphasis {
+                value: "fast".into()
+            }]
+        );
+    }
+
     /// Text in a table inside a quote went to the quote's text, so the cells
     /// were empty and the quote read `qr12`.
     #[test]
@@ -2535,6 +2687,7 @@ See [[WikiNote]] for more info."#;
             headers,
             rows,
             alignments,
+            ..
         } = &inner[0]
         else {
             panic!("{inner:?}");

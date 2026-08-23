@@ -554,10 +554,16 @@ pub enum ContentBlock {
     Table {
         /// The header cells.
         headers: Vec<String>,
+        /// Parsed presentation of each header cell. Rebuilt when parsing Markdown.
+        #[serde(skip)]
+        header_inline: Vec<Vec<InlineElement>>,
         /// Each column's alignment.
         alignments: Vec<TableAlignment>,
         /// The body rows, each a list of cells.
         rows: Vec<Vec<String>>,
+        /// Parsed presentation of each body cell. Rebuilt when parsing Markdown.
+        #[serde(skip)]
+        row_inline: Vec<Vec<Vec<InlineElement>>>,
     },
     /// An image (standalone, not inline)
     Image {

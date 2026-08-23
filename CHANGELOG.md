@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Table blocks expose semantic header and body cell elements for renderers, including link labels and inline styles. The new `header_inline` and `row_inline` fields are skipped by Serde, so the serialized shape is unchanged. Rust consumers constructing or exhaustively matching `ContentBlock::Table` must account for the new fields.
+
+### Fixed
+
+- Inline code inside a table link retains its label and source spelling. Quoted tables preserve inline styles through the parser's reconstruction step.
+
 ## [4.0.2] - 2026-10-16
 
 A security fix. Every crate moves to 4.0.2 with the workspace; turbovault-vector, turbovault-plugin-api and turbovault-plugin-vector are unchanged.
